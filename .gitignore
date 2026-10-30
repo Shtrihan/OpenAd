@@ -1,0 +1,13 @@
+# Secrets
+.env
+deploy/.env
+
+# Build output
+/server/bin/
+*.test
+*.out
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
