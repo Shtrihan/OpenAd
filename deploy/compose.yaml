@@ -86,7 +86,13 @@ services:
       OPENAD_HTTP_ADDR: ":8080"
       OPENAD_POSTGRES_URL: postgres://openad:${POSTGRES_PASSWORD}@postgres:5432/openad?sslmode=disable
       OPENAD_CLICKHOUSE_ADDR: clickhouse:9000
+      OPENAD_CLICKHOUSE_DB: openad
+      OPENAD_CLICKHOUSE_USER: openad
+      OPENAD_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       OPENAD_REDIS_ADDR: redis:6379
+      OPENAD_IP_HASH_KEY: ${IP_HASH_KEY:?set IP_HASH_KEY in .env}
+      OPENAD_TRUST_PROXY: ${OPENAD_TRUST_PROXY:-false}
+      OPENAD_GEO_COUNTRY_HEADER: ${OPENAD_GEO_COUNTRY_HEADER:-}
     ports:
       - "${OPENAD_HTTP_PORT:-8080}:8080"
     depends_on:

@@ -1,4 +1,4 @@
-.PHONY: up down logs test lint-api fmt
+.PHONY: up down logs seed smoke loadtest test lint-api fmt
 
 COMPOSE := docker compose -f deploy/compose.yaml --env-file deploy/.env
 
@@ -10,6 +10,15 @@ down:        ## Stop the stack (data volumes are kept)
 
 logs:
 	$(COMPOSE) logs -f --tail=100
+
+seed:        ## Load demo data (deploy/seed/dev.sql)
+	$(COMPOSE) exec -T postgres psql -U openad -d openad -v ON_ERROR_STOP=1 < deploy/seed/dev.sql
+
+smoke:       ## End-to-end test against the running, seeded stack
+	cd deploy && set -a && . ./.env && set +a && test/smoke.sh
+
+loadtest:    ## Load test POST /v1/ad against the running, seeded stack
+	cd server && go run ./cmd/loadtest -c 32 -d 20s
 
 test:        ## Go unit tests
 	cd server && go test -race ./...

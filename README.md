@@ -8,17 +8,19 @@ Self-hosted ad network for app cross-promotion within a trusted group of develop
 - **User-friendly:** ads only at natural pauses, a real close button, frequency caps
 - **Stack:** Go, PostgreSQL, ClickHouse, Redis, ffmpeg; deploys with a single `docker compose up`
 
-> Status: early development — stage 1 (foundation). The ad server answers health
-> checks; ad selection and event tracking arrive in stage 2.
+> Status: early development — stage 2 (ad server core). The server selects and
+> serves image ads, tracks signed events and enforces frequency caps; video
+> (VAST) arrives in stage 3.
 
 ## Quick start
 
 Requires Docker with Compose v2.
 
 ```bash
-cp deploy/.env.example deploy/.env   # set POSTGRES_PASSWORD and CLICKHOUSE_PASSWORD
+cp deploy/.env.example deploy/.env   # set the passwords and IP_HASH_KEY
 make up
 curl localhost:8080/readyz
+make seed                            # optional: two demo members and a campaign
 ```
 
 `make up` starts PostgreSQL, ClickHouse and Redis, applies migrations, then
@@ -40,15 +42,25 @@ starts the ad server. Data lives in Docker volumes and survives `make down`.
 ```bash
 make test       # Go unit tests (needs Go 1.23+)
 make lint-api   # validate the OpenAPI contract (needs Node)
+make smoke      # end-to-end test against the running, seeded stack
+make loadtest   # latency / throughput check against the running stack
 ```
 
-CI runs unit tests, the API lint and a full `docker compose up` with migration
-checks on every pull request.
+CI runs unit tests, the API lint, and against a full `docker compose up`:
+migrations, the end-to-end smoke test and a load test (p95 < 30 ms).
+
+### Geolocation
+
+Country targeting needs the client country. Either put the server behind a
+CDN that sets a country header (`OPENAD_GEO_COUNTRY_HEADER=CF-IPCountry` for
+Cloudflare), or mount a MaxMind-format country database (GeoLite2 Country or
+DB-IP Lite) and set `OPENAD_GEOIP_DB`. Without either, only campaigns without
+country targeting are served.
 
 ## Roadmap
 
-1. **Foundation** — repo, schemas, API contract, Docker Compose ← *now*
-2. Ad server core — campaign cache, targeting, frequency caps, rotation, signed events
+1. ~~Foundation~~ — repo, schemas, API contract, Docker Compose
+2. **Ad server core** — campaign cache, targeting, frequency caps, rotation, signed events ← *now*
 3. Video pipeline — ffmpeg transcoding, CDN, VAST 4
 4. Web SDK
 5. Member dashboard

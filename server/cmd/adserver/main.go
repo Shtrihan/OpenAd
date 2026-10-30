@@ -10,11 +10,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/Shtrihan/OpenAd/server/internal/catalog"
+	"github.com/Shtrihan/OpenAd/server/internal/chwriter"
 	"github.com/Shtrihan/OpenAd/server/internal/config"
+	"github.com/Shtrihan/OpenAd/server/internal/geo"
 	"github.com/Shtrihan/OpenAd/server/internal/httpapi"
+	"github.com/Shtrihan/OpenAd/server/internal/state"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -39,14 +47,77 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	pgAddr, _ := cfg.PostgresAddr() // validated by config.Load
 
-	// TCP reachability only; real client pings replace these in stage 2.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, cfg.PostgresURL)
+	if err != nil {
+		return fmt.Errorf("postgres: %w", err)
+	}
+	defer pool.Close()
+
+	ch, err := chwriter.Open(cfg.ClickHouseAddr, cfg.ClickHouseDB, cfg.ClickHouseUser, cfg.ClickHousePass)
+	if err != nil {
+		return fmt.Errorf("clickhouse: %w", err)
+	}
+	defer ch.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	defer rdb.Close()
+
+	resolver := geo.NewResolver([]byte(cfg.IPHashKey))
+	resolver.TrustProxy = cfg.TrustProxy
+	resolver.CountryHeader = cfg.CountryHeader
+	if cfg.GeoIPDB != "" {
+		db, err := geo.OpenDB(cfg.GeoIPDB)
+		if err != nil {
+			return fmt.Errorf("geoip: %w", err)
+		}
+		defer db.Close()
+		resolver.DB = db
+	}
+	if cfg.GeoIPDB == "" && cfg.CountryHeader == "" {
+		log.Warn("no GeoIP database or country header configured; country targeting will not match")
+	}
+
+	// Background work stops after the HTTP server has drained, so that
+	// events accepted by in-flight requests are still flushed.
+	bgCtx, stopBg := context.WithCancel(context.Background())
+	var bg sync.WaitGroup
+	defer func() { stopBg(); bg.Wait() }()
+
+	events := &chwriter.Batcher[chwriter.Event]{
+		Name: "events", Insert: chwriter.InsertEvents(ch), Log: log,
+		FlushSize: 5000, FlushInterval: time.Second, Capacity: 500_000,
+	}
+	requests := &chwriter.Batcher[chwriter.Request]{
+		Name: "ad_requests", Insert: chwriter.InsertRequests(ch), Log: log,
+		FlushSize: 5000, FlushInterval: time.Second, Capacity: 200_000,
+	}
+	store := catalog.NewStore(pool, log)
+	for _, fn := range []func(context.Context){events.Run, requests.Run, func(ctx context.Context) { startCatalog(ctx, pool, store, log) }} {
+		bg.Add(1)
+		go func() { defer bg.Done(); fn(bgCtx) }()
+	}
+
 	api := httpapi.New(version, map[string]httpapi.Check{
-		"postgres":   dialCheck(pgAddr),
-		"clickhouse": dialCheck(cfg.ClickHouseAddr),
-		"redis":      dialCheck(cfg.RedisAddr),
-	}, log)
+		"postgres":   pool.Ping,
+		"clickhouse": ch.Ping,
+		"redis":      func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
+		"catalog": func(context.Context) error {
+			if store.Snapshot() == nil {
+				return errors.New("not loaded")
+			}
+			return nil
+		},
+	}, log, httpapi.Deps{
+		Catalog:  store,
+		State:    state.New(rdb),
+		Events:   events,
+		Requests: requests,
+		Geo:      resolver,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -57,9 +128,6 @@ func run(log *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	errc := make(chan error, 1)
 	go func() {
@@ -85,15 +153,30 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-func dialCheck(addr string) httpapi.Check {
-	return func(ctx context.Context) error {
-		var d net.Dialer
-		conn, err := d.DialContext(ctx, "tcp", addr)
-		if err != nil {
-			return err
+// startCatalog loads the catalog, retrying until PostgreSQL is available,
+// then keeps it fresh. Until the first load the API answers 503.
+func startCatalog(ctx context.Context, pool *pgxpool.Pool, store *catalog.Store, log *slog.Logger) {
+	backoff := time.Second
+	for {
+		err := catalog.EnsureSigningKey(ctx, pool)
+		if err == nil {
+			err = store.Load(ctx)
 		}
-		return conn.Close()
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Warn("initial catalog load failed", "err", err, "retry_in", backoff.String())
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		backoff = min(backoff*2, 30*time.Second)
 	}
+	store.Run(ctx)
 }
 
 func healthcheck() int {
