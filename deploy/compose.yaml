@@ -1,0 +1,100 @@
+# OpenAd: the whole stack with one command.
+#   cp .env.example .env   # then set passwords
+#   docker compose up -d --build
+name: openad
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: openad
+      POSTGRES_USER: openad
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openad -d openad"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    <<: *restart
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DB: openad
+      CLICKHOUSE_USER: openad
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    <<: *restart
+    image: redis:7.4-alpine
+    # Frequency caps and dedup keys must survive restarts: AOF, fsync every second.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot migration jobs; adserver starts only after both succeed.
+  migrate-postgres:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ./migrations/postgres:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgres://openad:${POSTGRES_PASSWORD}@postgres:5432/openad?sslmode=disable
+      - up
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  migrate-clickhouse:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ./migrations/clickhouse:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=clickhouse://clickhouse:9000?username=openad&password=${CLICKHOUSE_PASSWORD}&database=openad
+      - up
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
+  adserver:
+    <<: *restart
+    build:
+      context: ../server
+      args:
+        VERSION: ${OPENAD_VERSION:-dev}
+    environment:
+      OPENAD_HTTP_ADDR: ":8080"
+      OPENAD_POSTGRES_URL: postgres://openad:${POSTGRES_PASSWORD}@postgres:5432/openad?sslmode=disable
+      OPENAD_CLICKHOUSE_ADDR: clickhouse:9000
+      OPENAD_REDIS_ADDR: redis:6379
+    ports:
+      - "${OPENAD_HTTP_PORT:-8080}:8080"
+    depends_on:
+      migrate-postgres: { condition: service_completed_successfully }
+      migrate-clickhouse: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  redis-data:

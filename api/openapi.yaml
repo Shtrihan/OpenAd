@@ -1,0 +1,590 @@
+openapi: 3.1.0
+info:
+  title: OpenAd Ad Serving API
+  version: 0.1.0
+  summary: Ad requests, event tracking and reward callbacks used by OpenAd SDKs.
+  description: |
+    Public API of the OpenAd ad server. SDKs only display ads and report events;
+    all ad selection happens on the server.
+
+    ## Flow
+    1. The SDK calls `POST /v1/ad` for a placement. The server either returns an
+       ad (`200`) or reports no fill (`204`).
+    2. The ad carries an opaque, signed `event_token`. Every event the SDK sends
+       for that ad must include this token; events with a missing, forged or
+       expired token are rejected.
+    3. The SDK reports events with `POST /v1/events` (batched). Video ads also
+       fire the VAST tracking URLs embedded in the VAST document; these hit
+       `GET /v1/t`.
+    4. For rewarded ads the server verifies the `reward` event and then calls
+       the app owner's server (see the `rewardCallback` webhook). Apps must
+       grant rewards based on that callback, not on the client-side event.
+
+    ## Counting rules
+    - `impression` is counted only once per ad, when the creative is actually
+      rendered on screen; `viewable` follows the visibility rule
+      (≥50% of pixels for ≥1 s for images, ≥2 s of playback for video).
+    - Events are deduplicated by `(ad_id, type)`; resending is safe.
+
+    ## Versioning
+    Breaking changes go to a new path prefix (`/v2`). Within `/v1`, fields may be
+    added; clients must ignore unknown fields.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+# SDK endpoints are public: apps cannot keep secrets. Integrity comes from the
+# server-signed event_token; the reward webhook is signed with HMAC.
+security: []
+
+servers:
+  - url: https://ads.example.com
+    description: Production (replace with your deployment)
+  - url: http://localhost:8080
+    description: Local docker compose
+
+tags:
+  - name: serving
+    description: Ad requests
+  - name: events
+    description: Event tracking
+  - name: ops
+    description: Health checks
+
+paths:
+  /v1/ad:
+    post:
+      tags: [serving]
+      operationId: requestAd
+      summary: Request an ad for a placement
+      description: |
+        Returns one ad that fits the placement format and targeting. Ads of the
+        requesting app's own member are never returned. Country is derived from
+        the client IP on the server and is not sent by the SDK.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdRequest'
+            example:
+              id: 6f1c2a4e-8b0d-4f7e-9a51-3c2d7b8e9f10
+              placement_id: 0b8f5c1e-2d3a-4b6c-8e7f-9a0b1c2d3e4f
+              app:
+                id: 3a9d7e21-5c4b-4f8a-b6e0-1d2c3b4a5f60
+                bundle: com.example.puzzle
+                version: 2.4.1
+              device:
+                platform: android
+                os_version: '14'
+                model: Pixel 8
+                language: ru
+                screen: { width: 1080, height: 2400, density: 2.625 }
+                connection: wifi
+              user:
+                installation_id: 5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a
+              sdk:
+                name: openad-android
+                version: 0.1.0
+              capabilities:
+                video: true
+                max_video_duration_s: 30
+      responses:
+        '200':
+          description: An ad was selected.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdResponse'
+        '204':
+          description: No fill — no eligible ad, or a frequency cap was hit.
+          headers:
+            X-OpenAd-No-Fill-Reason:
+              description: Machine-readable reason, for debugging only.
+              schema:
+                $ref: '#/components/schemas/NoFillReason'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Unknown or disabled placement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/events:
+    post:
+      tags: [events]
+      operationId: trackEvents
+      summary: Report a batch of ad events
+      description: |
+        Accepts up to 50 events. Each event is validated on its own; the
+        response lists which were accepted, duplicated or rejected. SDKs should
+        retry the whole batch on `5xx` or network errors (deduplication makes it
+        safe) and must not retry events reported as `rejected`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventBatch'
+      responses:
+        '200':
+          description: Batch processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventBatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          description: Batch too large.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/t:
+    get:
+      tags: [events]
+      operationId: trackPixel
+      summary: Tracking pixel for VAST trackers
+      description: |
+        Used by VAST `<Impression>` and `<Tracking>` URLs, which are plain GET
+        requests by spec. Semantics and deduplication are the same as
+        `POST /v1/events`. Always responds `204`, even on invalid tokens, so
+        players never retry; rejections are logged server-side.
+      parameters:
+        - name: e
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/EventType'
+        - name: tk
+          in: query
+          required: true
+          description: The ad's `event_token`.
+          schema: { type: string }
+        - name: ec
+          in: query
+          required: false
+          description: VAST error code, for `e=error` (VAST `[ERRORCODE]` macro).
+          schema: { type: integer }
+      responses:
+        '204':
+          description: Recorded (or silently ignored).
+
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness probe
+      description: Returns `503` until all dependencies (PostgreSQL, ClickHouse, Redis) are reachable.
+      responses:
+        '200':
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+webhooks:
+  rewardCallback:
+    post:
+      operationId: rewardCallback
+      summary: Server-to-server reward notification (sent to the app owner)
+      description: |
+        Sent by OpenAd to the app's `reward_callback_url` after a verified
+        `reward` event. The app owner's server must:
+
+        1. Verify `X-OpenAd-Signature`: hex HMAC-SHA256 of
+           `{X-OpenAd-Timestamp}.{raw request body}` with the app's reward
+           secret from the dashboard. Reject if the timestamp is older than
+           5 minutes.
+        2. Grant the reward once per `reward_id` (callbacks may be retried).
+        3. Respond `2xx` within 10 s. Any other result is retried with
+           exponential backoff for up to 24 h.
+      parameters:
+        - name: X-OpenAd-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - name: X-OpenAd-Timestamp
+          in: header
+          required: true
+          description: Unix time in seconds.
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RewardCallback'
+      responses:
+        '200':
+          description: Reward granted (or already granted for this `reward_id`).
+
+components:
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+
+    Format:
+      type: string
+      enum: [interstitial, popup, rewarded]
+      description: |
+        - `interstitial` — full screen, shown at a natural pause.
+        - `popup` — overlay over part of the screen (on the web: an in-page overlay, never `window.open`).
+        - `rewarded` — full screen, user opts in and receives a reward after completion.
+
+    Platform:
+      type: string
+      enum: [web, android, ios, desktop]
+
+    EventType:
+      type: string
+      enum:
+        - loaded
+        - impression
+        - viewable
+        - click
+        - close
+        - video_start
+        - video_q1
+        - video_mid
+        - video_q3
+        - video_complete
+        - reward
+        - error
+      description: |
+        - `loaded` — creative assets fetched and ready to show (not counted as an impression).
+        - `impression` — creative rendered on screen. Counted once.
+        - `viewable` — visibility rule met (see API description).
+        - `click` — user tapped the ad; the SDK opens `click_url`.
+        - `close` — user closed the ad.
+        - `video_*` — VAST playback progress.
+        - `reward` — rewarded ad completed; triggers the reward callback after server checks.
+        - `error` — failed to load or render; `data.code` holds a VAST-compatible error code.
+
+    NoFillReason:
+      type: string
+      enum: [no_eligible_ads, frequency_cap, placement_paused, targeting]
+
+    AdRequest:
+      type: object
+      required: [id, placement_id, app, device, user, sdk]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+          description: Client-generated request id, used for idempotency and debugging.
+        placement_id:
+          $ref: '#/components/schemas/Uuid'
+        app:
+          type: object
+          required: [id]
+          properties:
+            id: { $ref: '#/components/schemas/Uuid' }
+            bundle:
+              type: string
+              description: Bundle id, package name or site domain. Checked against the app registered in the dashboard.
+              maxLength: 255
+            version: { type: string, maxLength: 64 }
+        device:
+          type: object
+          required: [platform, language]
+          properties:
+            platform: { $ref: '#/components/schemas/Platform' }
+            os: { type: string, maxLength: 64, description: 'For `web`/`desktop`: windows, macos, linux, android, ios.' }
+            os_version: { type: string, maxLength: 64 }
+            model: { type: string, maxLength: 128 }
+            browser: { type: string, maxLength: 64, description: 'For `web`: chrome, safari, firefox, …' }
+            language:
+              type: string
+              description: BCP 47 primary language subtag.
+              pattern: '^[a-z]{2,3}$'
+            screen:
+              type: object
+              properties:
+                width: { type: integer, minimum: 1, description: Physical pixels. }
+                height: { type: integer, minimum: 1 }
+                density: { type: number, minimum: 0 }
+            connection:
+              type: string
+              enum: [wifi, cellular, ethernet, unknown]
+        user:
+          type: object
+          required: [installation_id]
+          properties:
+            installation_id:
+              $ref: '#/components/schemas/Uuid'
+              description: |
+                Random id generated by the SDK on first launch and stored locally.
+                Not an advertising id and not shared across apps; used only for
+                frequency caps and deduplication.
+        sdk:
+          type: object
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              enum: [openad-web, openad-android, openad-ios, openad-flutter, openad-react-native, openad-unity]
+            version: { type: string, maxLength: 32 }
+        capabilities:
+          type: object
+          properties:
+            video:
+              type: boolean
+              default: true
+            max_video_duration_s:
+              type: integer
+              minimum: 1
+        test:
+          type: boolean
+          default: false
+          description: Return a test ad; events are recorded separately and never billed or rewarded.
+
+    AdResponse:
+      type: object
+      required: [request_id, ad]
+      properties:
+        request_id: { $ref: '#/components/schemas/Uuid' }
+        ad: { $ref: '#/components/schemas/Ad' }
+
+    Ad:
+      type: object
+      required: [id, format, creative, event_token, expires_at, close]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+          description: Unique id of this served ad (one per response).
+        format: { $ref: '#/components/schemas/Format' }
+        creative: { $ref: '#/components/schemas/Creative' }
+        click_url:
+          type: string
+          format: uri
+          description: Destination opened on click (store page or website).
+        event_token:
+          type: string
+          description: |
+            Opaque signed token. Send it with every event for this ad. SDKs must
+            not parse it; its format may change without notice.
+        expires_at:
+          type: string
+          format: date-time
+          description: The ad must be shown before this time; afterwards events are rejected and the SDK should request a new ad.
+        close:
+          type: object
+          required: [delay_ms]
+          properties:
+            delay_ms:
+              type: integer
+              minimum: 0
+              maximum: 5000
+              description: Delay before the close button appears. Never more than 5 s.
+        reward:
+          type: object
+          description: Present only for `rewarded`.
+          required: [name, amount]
+          properties:
+            name: { type: string, examples: [coins] }
+            amount: { type: integer, minimum: 1 }
+        disclosure:
+          $ref: '#/components/schemas/Disclosure'
+
+    Creative:
+      type: object
+      required: [id, type]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        type:
+          type: string
+          enum: [image, video]
+        image:
+          description: Present when `type` is `image`. The SDK picks the asset that best fits the screen.
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [url, width, height, mime]
+            properties:
+              url: { type: string, format: uri }
+              width: { type: integer }
+              height: { type: integer }
+              mime: { type: string, enum: [image/jpeg, image/png, image/webp] }
+        vast:
+          type: string
+          description: |
+            Present when `type` is `video`. Inline VAST 4.x XML document with
+            MP4 (H.264/AAC) media files in several qualities and tracking URLs
+            pointing to `GET /v1/t`.
+
+    Disclosure:
+      type: object
+      description: Ad labelling shown in the corner of the creative. Required by law in some markets.
+      required: [label]
+      properties:
+        label:
+          type: string
+          description: Localized label to display, e.g. "Реклама" / "Ad".
+        advertiser:
+          type: string
+          description: Advertiser name shown with the label.
+        erid:
+          type: string
+          description: Russian ad registry token (ОРД). When present, the SDK must show it next to the label.
+
+    EventBatch:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Event' }
+
+    Event:
+      type: object
+      required: [type, event_token, ts]
+      properties:
+        type: { $ref: '#/components/schemas/EventType' }
+        event_token: { type: string }
+        ts:
+          type: string
+          format: date-time
+          description: Client time when the event happened. The server also records receive time and does not trust this for counting windows.
+        data:
+          type: object
+          description: Type-specific details.
+          properties:
+            code:
+              type: integer
+              description: For `error`. VAST 4 error code (e.g. 400 file not found, 405 unsupported media).
+            message: { type: string, maxLength: 512 }
+            visible_ms:
+              type: integer
+              description: For `viewable` and `close`. Time the ad was on screen.
+            played_ms:
+              type: integer
+              description: For video events and `reward`.
+            user_id:
+              type: string
+              maxLength: 256
+              description: For `reward`. App-defined user id, forwarded to the reward callback.
+            custom_data:
+              type: string
+              maxLength: 1024
+              description: For `reward`. Opaque string, forwarded to the reward callback.
+
+    EventBatchResult:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          description: One entry per input event, in the same order.
+          items:
+            type: object
+            required: [status]
+            properties:
+              status:
+                type: string
+                enum: [accepted, duplicate, rejected]
+              reason:
+                type: string
+                description: For `rejected`.
+                enum: [invalid_token, expired, unknown_type, out_of_order, invalid_data]
+
+    RewardCallback:
+      type: object
+      required: [reward_id, ad_id, app_id, placement_id, installation_id, reward, ts]
+      properties:
+        reward_id:
+          $ref: '#/components/schemas/Uuid'
+          description: Idempotency key. Grant at most once per value.
+        ad_id: { $ref: '#/components/schemas/Uuid' }
+        app_id: { $ref: '#/components/schemas/Uuid' }
+        placement_id: { $ref: '#/components/schemas/Uuid' }
+        installation_id: { $ref: '#/components/schemas/Uuid' }
+        user_id:
+          type: string
+          description: Optional app-defined user id that the app passed to the SDK when showing the ad.
+        custom_data:
+          type: string
+          maxLength: 1024
+          description: Optional opaque string the app passed to the SDK when showing the ad.
+        reward:
+          type: object
+          required: [name, amount]
+          properties:
+            name: { type: string }
+            amount: { type: integer }
+        test: { type: boolean }
+        ts: { type: string, format: date-time }
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        version: { type: string }
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, down]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              examples: [invalid_request, unknown_placement, rate_limited]
+            message: { type: string }

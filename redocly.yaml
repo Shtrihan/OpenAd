@@ -1,0 +1,12 @@
+extends:
+  - recommended
+
+apis:
+  openad:
+    root: api/openapi.yaml
+
+rules:
+  # Server URLs in the spec are placeholders; each deployment sets its own.
+  no-server-example.com: off
+  # /healthz, /readyz and the VAST pixel have no meaningful 4xx responses.
+  operation-4xx-response: off

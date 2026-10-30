@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Go server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  api:
+    name: API contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx -y @redocly/cli@1.25.11 lint
+
+  stack:
+    name: docker compose up
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+          sed -i "s/^CLICKHOUSE_PASSWORD=.*/CLICKHOUSE_PASSWORD=$(openssl rand -hex 16)/" .env
+      - name: Start stack
+        run: docker compose up -d --build
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/readyz; then exit 0; fi
+            sleep 2
+          done
+          echo "adserver not ready" >&2
+          exit 1
+      - name: Check migrations
+        run: |
+          docker compose exec -T postgres psql -U openad -d openad -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM members, apps, placements, campaigns, creatives"
+          docker compose exec -T clickhouse clickhouse-client --user openad \
+            --password "$(grep ^CLICKHOUSE_PASSWORD= .env | cut -d= -f2)" -d openad \
+            -q "SELECT count() FROM system.tables WHERE database = 'openad' AND name IN ('events','ad_requests','daily_stats','daily_stats_mv')" \
+            | grep -qx 4
+      - name: Check migrations roll back and forward
+        run: |
+          docker compose run --rm migrate-postgres -path=/migrations \
+            "-database=postgres://openad:$(grep ^POSTGRES_PASSWORD= .env | cut -d= -f2)@postgres:5432/openad?sslmode=disable" down -all
+          docker compose run --rm migrate-postgres
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color
+      - name: Stop
+        if: always()
+        run: docker compose down -v
