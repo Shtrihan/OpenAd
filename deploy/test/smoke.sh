@@ -5,9 +5,12 @@
 set -euo pipefail
 
 BASE=${1:-http://localhost:8080}
-PLACEMENT=00000000-0000-4000-8000-000000000021
-APP=00000000-0000-4000-8000-000000000011
-RACER_CREATIVE=00000000-0000-4000-8000-000000000041
+PLACEMENT=00000000-0000-4000-8000-000000000021         # portfolio only
+CIRCLE_PLACEMENT=00000000-0000-4000-8000-000000000022  # portfolio and circle
+APP=00000000-0000-4000-8000-000000000011                # Puzzle
+WORDS_CREATIVE=00000000-0000-4000-8000-000000000043     # publisher's other app
+PUZZLE_CREATIVE=00000000-0000-4000-8000-000000000042    # promotes Puzzle itself
+RACER_CREATIVE=00000000-0000-4000-8000-000000000041     # circle member
 uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-Z' 'a-z'; }
 INSTALL=$(uuid)
 
@@ -16,17 +19,17 @@ ch() { docker compose exec -T clickhouse clickhouse-client --user openad --passw
 
 ad_request() {
   cat <<JSON
-{"id":"$(uuid)","placement_id":"$PLACEMENT",
+{"id":"$(uuid)","placement_id":"${2:-$PLACEMENT}",
  "app":{"id":"$APP","bundle":"com.example.puzzle","version":"1.0"},
  "device":{"platform":"android","language":"ru"},
- "user":{"installation_id":"$INSTALL"},
+ "user":{"installation_id":"${1:-$INSTALL}"},
  "sdk":{"name":"openad-android","version":"0.1.0"}}
 JSON
 }
 
-echo "1. Ad request is filled with the other member's campaign"
+echo "1. Portfolio placement shows the owner's other app, never the app itself or the circle"
 AD=$(curl -fsS -X POST "$BASE/v1/ad" -H 'Content-Type: application/json' -d "$(ad_request)")
-[ "$(jq -r .ad.creative.id <<<"$AD")" = "$RACER_CREATIVE" ] || fail "unexpected ad: $AD"
+[ "$(jq -r .ad.creative.id <<<"$AD")" = "$WORDS_CREATIVE" ] || fail "unexpected ad: $AD"
 [ "$(jq -r .ad.disclosure.label <<<"$AD")" = "Реклама" ] || fail "missing disclosure: $AD"
 TOKEN=$(jq -r .ad.event_token <<<"$AD")
 AD_ID=$(jq -r .ad.id <<<"$AD")
@@ -54,7 +57,17 @@ HDR=$(curl -sS -o /dev/null -D - -X POST "$BASE/v1/ad" -H 'Content-Type: applica
 grep -q '^HTTP/1.1 204' <<<"$HDR" || fail "expected 204: $HDR"
 grep -qi '^x-openad-no-fill-reason: frequency_cap' <<<"$HDR" || fail "expected frequency_cap: $HDR"
 
-echo "5. Rows reach ClickHouse"
+echo "5. Circle placement mixes in other members, still never the app itself"
+SEEN=""
+for i in $(seq 1 20); do
+  C=$(curl -fsS -X POST "$BASE/v1/ad" -H 'Content-Type: application/json' \
+    -d "$(ad_request "$(uuid)" "$CIRCLE_PLACEMENT")" | jq -r .ad.creative.id)
+  [ "$C" != "$PUZZLE_CREATIVE" ] || fail "app promoted itself"
+  SEEN="$SEEN $C"
+done
+grep -q "$RACER_CREATIVE" <<<"$SEEN" || fail "circle campaign never served in 20 requests"
+
+echo "6. Rows reach ClickHouse"
 for i in $(seq 1 15); do
   N=$(ch "SELECT count() FROM events WHERE ad_id = '$AD_ID'")
   [ "$N" = 3 ] && break
@@ -63,7 +76,7 @@ done
 [ "$N" = 3 ] || fail "expected 3 events in ClickHouse, got $N"
 R=$(ch "SELECT countIf(filled), countIf(no_fill_reason = 'frequency_cap') FROM ad_requests WHERE installation_id = '$INSTALL'")
 [ "$R" = "$(printf '1\t1')" ] || fail "ad_requests: $R"
-S=$(ch "SELECT sum(count) FROM daily_stats WHERE campaign_id = '00000000-0000-4000-8000-000000000031' AND event_type = 'impression'")
+S=$(ch "SELECT sum(count) FROM daily_stats WHERE campaign_id = '00000000-0000-4000-8000-000000000033' AND event_type = 'impression'")
 [ "$S" -ge 1 ] || fail "daily_stats not populated"
 
 echo "OK"

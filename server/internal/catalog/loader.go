@@ -168,7 +168,7 @@ func load(ctx context.Context, pool *pgxpool.Pool) (*Snapshot, error) {
 
 func loadPlacements(ctx context.Context, tx pgx.Tx, snap *Snapshot) error {
 	rows, err := tx.Query(ctx, `
-		SELECT p.id::text, a.id::text, a.member_id::text, a.platform::text, a.bundle, p.format::text,
+		SELECT p.id::text, a.id::text, a.member_id::text, a.platform::text, a.bundle, p.format::text, p.demand::text,
 		       coalesce(p.min_interval_s, 0), coalesce(p.max_per_session, 0), coalesce(p.max_per_day, 0),
 		       p.close_delay_ms, p.allow_video, coalesce(p.max_video_duration_s, 0),
 		       coalesce(p.reward_name, ''), coalesce(p.reward_amount, 0)
@@ -182,7 +182,7 @@ func loadPlacements(ctx context.Context, tx pgx.Tx, snap *Snapshot) error {
 	defer rows.Close()
 	for rows.Next() {
 		var p Placement
-		if err := rows.Scan(&p.ID, &p.AppID, &p.MemberID, &p.Platform, &p.Bundle, &p.Format,
+		if err := rows.Scan(&p.ID, &p.AppID, &p.MemberID, &p.Platform, &p.Bundle, &p.Format, &p.Demand,
 			&p.MinIntervalS, &p.MaxPerSession, &p.MaxPerDay,
 			&p.CloseDelayMs, &p.AllowVideo, &p.MaxVideoDurationS,
 			&p.RewardName, &p.RewardAmount); err != nil {

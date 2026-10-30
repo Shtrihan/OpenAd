@@ -1,16 +1,22 @@
 # OpenAd
 
-Self-hosted ad network for app cross-promotion within a trusted group of developers.
+Self-hosted house ads and cross-promotion engine for your own app portfolio —
+optionally shared with a small circle of invited developers.
 
-- **Formats:** interstitial, popup, rewarded — static banners and video (VAST 4)
-- **Platforms:** Web, Android, iOS, desktop (Electron/Tauri); wrappers for Flutter, React Native, Unity
+Built for indie developers and small studios who want to promote their other
+apps on impressions the main ad network leaves unfilled, without depending on
+a single vendor. See [docs/roadmap.md](docs/roadmap.md) for scope and the
+reasoning behind it.
+
+- **Portfolio first:** an app shows your other apps; showing a friend's apps is opt-in per placement
+- **Formats:** interstitial, rewarded — static banners, video (VAST 4) planned
+- **Platforms:** Web and Android first; iOS, desktop and engine wrappers later
 - **Honest metrics:** an impression counts only when the ad is actually visible; signed, deduplicated events
 - **User-friendly:** ads only at natural pauses, a real close button, frequency caps
 - **Stack:** Go, PostgreSQL, ClickHouse, Redis, ffmpeg; deploys with a single `docker compose up`
 
-> Status: early development — stage 2 (ad server core). The server selects and
-> serves image ads, tracks signed events and enforces frequency caps; video
-> (VAST) arrives in stage 3.
+> Status: early development. The ad server selects and serves image ads,
+> tracks signed events and enforces frequency caps. SDKs are next.
 
 ## Quick start
 
@@ -59,14 +65,7 @@ country targeting are served.
 
 ## Roadmap
 
-1. ~~Foundation~~ — repo, schemas, API contract, Docker Compose
-2. **Ad server core** — campaign cache, targeting, frequency caps, rotation, signed events ← *now*
-3. Video pipeline — ffmpeg transcoding, CDN, VAST 4
-4. Web SDK
-5. Member dashboard
-6. Android and iOS SDKs
-7. Rewards and anti-fraud
-8. Flutter / React Native / Unity wrappers and pilot
+See [docs/roadmap.md](docs/roadmap.md).
 
 ## License
 

@@ -28,9 +28,13 @@ const (
 	advMember  = "22222222-2222-4222-8222-222222222222"
 	pubApp     = "33333333-3333-4333-8333-333333333333"
 	placementI = "44444444-4444-4444-8444-444444444444"
-	campaignA  = "55555555-5555-4555-8555-555555555555"
-	campaignWn = "66666666-6666-4666-8666-666666666666" // the publisher's own campaign
+	campaignA  = "55555555-5555-4555-8555-555555555555" // another member's app (circle)
+	campaignWn = "66666666-6666-4666-8666-666666666666" // promotes the placement's own app
+	campaignPf = "cccccccc-cccc-4ccc-8ccc-cccccccccccc" // the publisher's other app (portfolio)
 	install    = "77777777-7777-4777-8777-777777777777"
+
+	creativeA  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	creativePf = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 )
 
 type fixedCatalog struct{ snap *catalog.Snapshot }
@@ -77,11 +81,12 @@ func testSnapshot() *catalog.Snapshot {
 	return &catalog.Snapshot{
 		Placements: map[string]*catalog.Placement{placementI: {
 			ID: placementI, AppID: pubApp, MemberID: pubMember, Platform: "android", Format: "interstitial",
-			MinIntervalS: 60, CloseDelayMs: 3000, AllowVideo: true,
+			Demand: "portfolio", MinIntervalS: 60, CloseDelayMs: 3000, AllowVideo: true,
 		}},
 		Campaigns: []*catalog.Campaign{
 			{ID: campaignWn, MemberID: pubMember, AppID: pubApp, Weight: 10000, Creatives: []*catalog.Creative{img("88888888-8888-4888-8888-888888888888")}},
-			{ID: campaignA, MemberID: advMember, AppID: "99999999-9999-4999-8999-999999999999", Weight: 1, Creatives: []*catalog.Creative{img("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")}},
+			{ID: campaignPf, MemberID: pubMember, AppID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", Weight: 1, Creatives: []*catalog.Creative{img(creativePf)}},
+			{ID: campaignA, MemberID: advMember, AppID: "99999999-9999-4999-8999-999999999999", Weight: 10000, Creatives: []*catalog.Creative{img(creativeA)}},
 		},
 		Keyring: token.NewKeyring(token.Key{ID: "k1", Secret: bytes.Repeat([]byte{7}, 32)}),
 	}
@@ -194,16 +199,32 @@ func TestReadyzReportsFailures(t *testing.T) {
 	}
 }
 
-func TestServeExcludesOwnCampaign(t *testing.T) {
+func TestServePortfolioOnlyByDefault(t *testing.T) {
 	e := newEnv(t)
 	for i := 0; i < 20; i++ {
 		resp, ad := e.requestAd(t, adReq())
 		if resp.StatusCode != 200 {
 			t.Fatalf("status %d", resp.StatusCode)
 		}
-		if ad.Ad.Creative.ID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
-			t.Fatalf("served own campaign: %+v", ad.Ad.Creative)
+		if ad.Ad.Creative.ID != creativePf {
+			t.Fatalf("portfolio placement served %s", ad.Ad.Creative.ID)
 		}
+	}
+}
+
+func TestServeCircleIsOptIn(t *testing.T) {
+	e := newEnv(t)
+	e.snap.Placements[placementI].Demand = "portfolio_and_circle"
+	seen := map[string]int{}
+	for i := 0; i < 50; i++ {
+		_, ad := e.requestAd(t, adReq())
+		seen[ad.Ad.Creative.ID]++
+	}
+	if seen["88888888-8888-4888-8888-888888888888"] > 0 {
+		t.Fatal("an app must never promote itself")
+	}
+	if seen[creativeA] == 0 {
+		t.Fatalf("circle campaign never served: %v", seen)
 	}
 }
 
@@ -258,7 +279,7 @@ func TestNoFillReasons(t *testing.T) {
 	}
 
 	e2 := newEnv(t)
-	e2.snap.Campaigns[1].Countries = map[string]bool{"DE": true}
+	e2.snap.Campaigns[1].Countries = map[string]bool{"DE": true} // the only portfolio campaign
 	resp, _ = e2.requestAd(t, adReq())
 	if resp.StatusCode != 204 || resp.Header.Get("X-OpenAd-No-Fill-Reason") != "no_eligible_ads" {
 		t.Fatalf("targeting: %d", resp.StatusCode)
@@ -287,7 +308,7 @@ func TestEventFlowAndFrequencyCap(t *testing.T) {
 		t.Fatalf("reason: %+v", res[0])
 	}
 	rows := e.events.all()
-	if len(rows) != 3 || rows[1].Type != "impression" || rows[1].CampaignID.String() != campaignA || rows[1].Country != "" {
+	if len(rows) != 3 || rows[1].Type != "impression" || rows[1].CampaignID.String() != campaignPf || rows[1].Country != "" {
 		t.Fatalf("rows: %+v", rows)
 	}
 

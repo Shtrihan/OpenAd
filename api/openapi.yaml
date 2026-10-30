@@ -58,9 +58,11 @@ paths:
       operationId: requestAd
       summary: Request an ad for a placement
       description: |
-        Returns one ad that fits the placement format and targeting. Ads of the
-        requesting app's own member are never returned. Country is derived from
-        the client IP on the server and is not sent by the SDK.
+        Returns one ad that fits the placement format and targeting. An app
+        never promotes itself. By default a placement shows only the owner's
+        other apps (portfolio); campaigns of other members are shown only if
+        the placement opted into the circle. Country is derived from the
+        client IP on the server and is not sent by the SDK.
       requestBody:
         required: true
         content:

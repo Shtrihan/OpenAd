@@ -29,9 +29,12 @@
   ids.
 - **Request path.** `POST /v1/ad`: validate → look up placement in the
   snapshot → blocklist → targeting (format, platform, country, language,
-  schedule, never the member's own campaigns) → one Redis `MGET` for frequency
+  schedule, demand mode) → one Redis `MGET` for frequency
   caps → weighted random pick → sign token. If Redis is down the server
   answers 503 rather than serve without caps.
+- **Portfolio first.** An app never promotes itself. A placement's `demand`
+  is `portfolio` by default — only the owner's other apps — or
+  `portfolio_and_circle`, which also admits campaigns of invited members.
 - **Caps count impressions, not responses.** An ad that was fetched but never
   shown does not use up the user's cap. Caps are per installation: placement
   minimum interval, per session, per UTC day; campaign per UTC day.
