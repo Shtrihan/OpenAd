@@ -16,6 +16,9 @@ type Placement struct {
 	Platform string // platform of the app
 	Bundle   string
 	Format   string
+	// Demand is "portfolio" (only the owner's other apps) or
+	// "portfolio_and_circle" (also campaigns of other members).
+	Demand string
 
 	MinIntervalS      int // 0 = no cap
 	MaxPerSession     int

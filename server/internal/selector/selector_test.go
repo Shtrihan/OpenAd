@@ -29,8 +29,9 @@ func campaign(id, member string, weight int) *catalog.Campaign {
 
 func req() Request {
 	return Request{
-		Placement: &catalog.Placement{ID: "p", MemberID: "pub", Format: "interstitial", AllowVideo: true},
-		Platform:  "android", Country: "RU", Language: "ru", Video: true, Now: now,
+		Placement: &catalog.Placement{ID: "p", AppID: "app-self", MemberID: "pub", Format: "interstitial",
+			Demand: "portfolio_and_circle", AllowVideo: true},
+		Platform: "android", Country: "RU", Language: "ru", Video: true, Now: now,
 	}
 }
 
@@ -44,6 +45,7 @@ func ids(cs []*catalog.Campaign) []string {
 
 func TestEligibleTargeting(t *testing.T) {
 	own := campaign("own", "pub", 100)
+	own.AppID = "app-self" // the placement's own app: never promotes itself
 
 	wrongFormat := campaign("fmt", "a", 100)
 	wrongFormat.Formats = set("rewarded")
@@ -93,6 +95,24 @@ func TestEligibleTargeting(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestDemandPortfolioFirst(t *testing.T) {
+	self := campaign("self", "pub", 1)
+	self.AppID = "app-self"
+	sibling := campaign("sibling", "pub", 1) // another app of the same owner
+	circle := campaign("circle", "friend", 1)
+	snap := &catalog.Snapshot{Campaigns: []*catalog.Campaign{self, sibling, circle}}
+
+	r := req()
+	r.Placement.Demand = "portfolio"
+	if got := ids(Eligible(snap, r)); len(got) != 1 || got[0] != "sibling" {
+		t.Fatalf("portfolio: got %v", got)
+	}
+	r.Placement.Demand = "portfolio_and_circle"
+	if got := ids(Eligible(snap, r)); len(got) != 2 || got[0] != "sibling" || got[1] != "circle" {
+		t.Fatalf("portfolio_and_circle: got %v", got)
 	}
 }
 

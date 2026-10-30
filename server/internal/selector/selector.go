@@ -24,7 +24,7 @@ type Request struct {
 func Eligible(snap *catalog.Snapshot, req Request) []*catalog.Campaign {
 	var out []*catalog.Campaign
 	for _, c := range snap.Campaigns {
-		if c.MemberID == req.Placement.MemberID || // never advertise to yourself
+		if !demandAllows(req.Placement, c) ||
 			snap.AppBlocked(c.AppID) ||
 			!c.Active(req.Now) ||
 			!match(c.Formats, req.Placement.Format) ||
@@ -96,6 +96,15 @@ func creativeFits(cr *catalog.Creative, req Request) bool {
 		return false
 	}
 	return p.MaxVideoDurationS == 0 || cr.DurationMs <= p.MaxVideoDurationS*1000
+}
+
+// demandAllows applies the portfolio-first rule: an app never promotes
+// itself; other members' campaigns are shown only if the placement opted in.
+func demandAllows(p *catalog.Placement, c *catalog.Campaign) bool {
+	if c.AppID == p.AppID {
+		return false
+	}
+	return c.MemberID == p.MemberID || p.Demand == "portfolio_and_circle"
 }
 
 // match treats an empty set as "any value", including unknown ("").
