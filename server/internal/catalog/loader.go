@@ -94,12 +94,14 @@ func (s *Store) listen(ctx context.Context, changed chan<- struct{}) {
 }
 
 func (s *Store) listenOnce(ctx context.Context, changed chan<- struct{}) error {
-	conn, err := s.pool.Acquire(ctx)
+	pooled, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
-	// The connection carries LISTEN state; don't return it to the pool.
-	defer conn.Hijack().Close(context.Background())
+	// The connection carries LISTEN state, so take it out of the pool for
+	// good. After Hijack the pooled handle is invalid; use only conn.
+	conn := pooled.Hijack()
+	defer conn.Close(context.Background())
 
 	if _, err := conn.Exec(ctx, "LISTEN openad_catalog"); err != nil {
 		return err
@@ -110,7 +112,7 @@ func (s *Store) listenOnce(ctx context.Context, changed chan<- struct{}) error {
 	default:
 	}
 	for {
-		if _, err := conn.Conn().WaitForNotification(ctx); err != nil {
+		if _, err := conn.WaitForNotification(ctx); err != nil {
 			return err
 		}
 		select {
