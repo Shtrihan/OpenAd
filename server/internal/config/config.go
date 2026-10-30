@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -14,8 +15,17 @@ type Config struct {
 	HTTPAddr        string        // OPENAD_HTTP_ADDR
 	PostgresURL     string        // OPENAD_POSTGRES_URL
 	ClickHouseAddr  string        // OPENAD_CLICKHOUSE_ADDR, native protocol host:port
+	ClickHouseDB    string        // OPENAD_CLICKHOUSE_DB
+	ClickHouseUser  string        // OPENAD_CLICKHOUSE_USER
+	ClickHousePass  string        // OPENAD_CLICKHOUSE_PASSWORD
 	RedisAddr       string        // OPENAD_REDIS_ADDR
+	RedisPassword   string        // OPENAD_REDIS_PASSWORD
 	ShutdownTimeout time.Duration // OPENAD_SHUTDOWN_TIMEOUT
+
+	IPHashKey     string // OPENAD_IP_HASH_KEY, secret for hashing client IPs
+	TrustProxy    bool   // OPENAD_TRUST_PROXY, read client IP from X-Forwarded-For
+	CountryHeader string // OPENAD_GEO_COUNTRY_HEADER, e.g. CF-IPCountry
+	GeoIPDB       string // OPENAD_GEOIP_DB, path to a MaxMind-format country database
 }
 
 // Load reads the environment and validates the result.
@@ -35,7 +45,25 @@ func load(getenv func(string) string) (Config, error) {
 		HTTPAddr:       get("OPENAD_HTTP_ADDR", ":8080"),
 		PostgresURL:    getenv("OPENAD_POSTGRES_URL"),
 		ClickHouseAddr: get("OPENAD_CLICKHOUSE_ADDR", "localhost:9000"),
+		ClickHouseDB:   get("OPENAD_CLICKHOUSE_DB", "openad"),
+		ClickHouseUser: get("OPENAD_CLICKHOUSE_USER", "default"),
+		ClickHousePass: getenv("OPENAD_CLICKHOUSE_PASSWORD"),
 		RedisAddr:      get("OPENAD_REDIS_ADDR", "localhost:6379"),
+		RedisPassword:  getenv("OPENAD_REDIS_PASSWORD"),
+		IPHashKey:      getenv("OPENAD_IP_HASH_KEY"),
+		CountryHeader:  getenv("OPENAD_GEO_COUNTRY_HEADER"),
+		GeoIPDB:        getenv("OPENAD_GEOIP_DB"),
+	}
+
+	if v := getenv("OPENAD_TRUST_PROXY"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("OPENAD_TRUST_PROXY: %w", err)
+		}
+		c.TrustProxy = b
+	}
+	if len(c.IPHashKey) < 16 {
+		return Config{}, fmt.Errorf("OPENAD_IP_HASH_KEY must be at least 16 characters")
 	}
 
 	timeout, err := time.ParseDuration(get("OPENAD_SHUTDOWN_TIMEOUT", "15s"))

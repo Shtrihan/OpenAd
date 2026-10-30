@@ -14,16 +14,25 @@ import (
 // Check reports whether one dependency is reachable.
 type Check func(ctx context.Context) error
 
-// Server routes HTTP requests. Ad selection and event handling arrive in
-// stage 2; until then those endpoints answer 501.
+// Server routes HTTP requests.
 type Server struct {
 	version string
 	checks  map[string]Check
 	log     *slog.Logger
+	deps    Deps
 }
 
-func New(version string, checks map[string]Check, log *slog.Logger) *Server {
-	return &Server{version: version, checks: checks, log: log}
+func New(version string, checks map[string]Check, log *slog.Logger, deps Deps) *Server {
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	if deps.ShowWindow == 0 {
+		deps.ShowWindow = time.Hour
+	}
+	if deps.EventGrace == 0 {
+		deps.EventGrace = 6 * time.Hour
+	}
+	return &Server{version: version, checks: checks, log: log, deps: deps}
 }
 
 // Handler returns the root handler with all routes and middleware.
@@ -31,8 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
-	mux.HandleFunc("POST /v1/ad", notImplemented)
-	mux.HandleFunc("POST /v1/events", notImplemented)
+	mux.HandleFunc("POST /v1/ad", s.requestAd)
+	mux.HandleFunc("POST /v1/events", s.trackEvents)
 	mux.HandleFunc("GET /v1/t", s.pixel)
 	return s.recoverer(s.accessLog(mux))
 }
@@ -80,16 +89,6 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, code, resp)
-}
-
-// pixel always answers 204 so VAST players never retry (see the API contract).
-func (s *Server) pixel(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "endpoint is not implemented yet")
 }
 
 type apiError struct {

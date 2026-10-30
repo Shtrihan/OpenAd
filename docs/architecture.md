@@ -27,10 +27,22 @@
   a key from `signing_keys` (several keys may be valid during rotation). Events
   without a valid token are rejected, so counts cannot be forged by replaying
   ids.
+- **Request path.** `POST /v1/ad`: validate → look up placement in the
+  snapshot → blocklist → targeting (format, platform, country, language,
+  schedule, never the member's own campaigns) → one Redis `MGET` for frequency
+  caps → weighted random pick → sign token. If Redis is down the server
+  answers 503 rather than serve without caps.
+- **Caps count impressions, not responses.** An ad that was fetched but never
+  shown does not use up the user's cap. Caps are per installation: placement
+  minimum interval, per session, per UTC day; campaign per UTC day.
 - **Exactly-once counting.** The ad server deduplicates by `(ad_id, type)` in
   Redis before inserting into ClickHouse. The `events` table is a
   `ReplacingMergeTree` on the same key as a safety net for ad-hoc queries
-  (`FINAL`); dashboard reports read `daily_stats`.
+  (`FINAL`); dashboard reports read `daily_stats`. Events like `click` or
+  `reward` are rejected as `out_of_order` unless the ad's impression was
+  recorded first. Rows are buffered in memory and written in batches; when the
+  buffer is full the event endpoint answers 503 before touching Redis, so
+  nothing is marked as seen without being stored.
 - **Rewards are server-side.** The client `reward` event alone never grants
   anything; after checks the server calls the app owner's endpoint, which
   grants the reward idempotently by `reward_id`.
